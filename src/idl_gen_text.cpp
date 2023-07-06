@@ -18,8 +18,8 @@
 #include "idl_gen_text.h"
 
 #include <algorithm>
+#include "nlohmann/json.hpp"
 
-#include "flatbuffers/base.h"
 #include "flatbuffers/code_generator.h"
 #include "flatbuffers/flatbuffers.h"
 #include "flatbuffers/flexbuffers.h"
@@ -30,12 +30,8 @@ namespace flatbuffers {
 
 struct PrintScalarTag {};
 struct PrintPointerTag {};
-template<typename T> struct PrintTag {
-  typedef PrintScalarTag type;
-};
-template<> struct PrintTag<const void *> {
-  typedef PrintPointerTag type;
-};
+template<typename T> struct PrintTag { typedef PrintScalarTag type; };
+template<> struct PrintTag<const void *> { typedef PrintPointerTag type; };
 
 struct JsonPrinter {
   // If indentation is less than 0, that indicates we don't want any newlines
@@ -106,13 +102,15 @@ struct JsonPrinter {
 
   // Print a vector or an array of JSON values, comma seperated, wrapped in
   // "[]".
-  template<typename Container, typename SizeT = typename Container::size_type>
-  const char *PrintContainer(PrintScalarTag, const Container &c, SizeT size,
-                             const Type &type, int indent, const uint8_t *) {
+  template<typename Container>
+  const char *PrintContainer(PrintScalarTag, const Container &c, size_t size,
+                             const Type &type, int indent, const uint8_t *,
+                             const flatbuffers::Type &typeRaw) {
+    (void)(typeRaw);
     const auto elem_indent = indent + Indent();
     text += '[';
     AddNewLine();
-    for (SizeT i = 0; i < size; i++) {
+    for (uoffset_t i = 0; i < size; i++) {
       if (i) {
         AddComma();
         AddNewLine();
@@ -128,56 +126,80 @@ struct JsonPrinter {
 
   // Print a vector or an array of JSON values, comma seperated, wrapped in
   // "[]".
-  template<typename Container, typename SizeT = typename Container::size_type>
-  const char *PrintContainer(PrintPointerTag, const Container &c, SizeT size,
+  template<typename Container>
+  const char *PrintContainer(PrintPointerTag, const Container &c, size_t size,
                              const Type &type, int indent,
-                             const uint8_t *prev_val) {
+                             const uint8_t *prev_val,
+                             const flatbuffers::Type &typeRaw) {
     const auto is_struct = IsStruct(type);
     const auto elem_indent = indent + Indent();
-    text += '[';
-    AddNewLine();
-    for (SizeT i = 0; i < size; i++) {
-      if (i) {
-        AddComma();
-        AddNewLine();
+    const auto is_map_type = typeRaw.struct_def != nullptr &&
+                             typeRaw.struct_def->name.find("dict__", 0) == 0;
+    if (!is_map_type) {
+      text += '[';
+      AddNewLine();
+      for (uoffset_t i = 0; i < size; i++) {
+        if (i) {
+          AddComma();
+          AddNewLine();
+        }
+        AddIndent(elem_indent);
+        auto ptr = is_struct ? reinterpret_cast<const void *>(
+                                   c.Data() + type.struct_def->bytesize * i)
+                             : c[i];
+        auto err = PrintOffset(ptr, type, elem_indent, prev_val,
+                               static_cast<soffset_t>(i));
+        if (err) return err;
       }
-      AddIndent(elem_indent);
-      auto ptr = is_struct ? reinterpret_cast<const void *>(
-                                 c.Data() + type.struct_def->bytesize * i)
-                           : c[i];
-      auto err = PrintOffset(ptr, type, elem_indent, prev_val,
-                             static_cast<soffset_t>(i));
-      if (err) return err;
+      AddNewLine();
+      AddIndent(indent);
+      text += ']';
+    } else {
+      text += '{';
+      AddNewLine();
+      for (uoffset_t i = 0; i < size; i++) {
+        if (i) {
+          AddComma();
+          AddNewLine();
+        }
+        AddIndent(elem_indent);
+        auto ptr = is_struct ? reinterpret_cast<const void *>(
+                                   c.Data() + type.struct_def->bytesize * i)
+                             : c[i];
+        auto err = PrintOffset(ptr, type, elem_indent, prev_val,
+                               static_cast<soffset_t>(i));
+        if (err) return err;
+      }
+      AddNewLine();
+      AddIndent(indent);
+      text += '}';
     }
-    AddNewLine();
-    AddIndent(indent);
-    text += ']';
     return nullptr;
   }
 
-  template<typename T, typename SizeT = uoffset_t>
+  template<typename T>
   const char *PrintVector(const void *val, const Type &type, int indent,
-                          const uint8_t *prev_val) {
-    typedef Vector<T, SizeT> Container;
+                   const uint8_t *prev_val, const flatbuffers::Type& typeRaw) {
+    typedef Vector<T> Container;
     typedef typename PrintTag<typename Container::return_type>::type tag;
     auto &vec = *reinterpret_cast<const Container *>(val);
     return PrintContainer<Container>(tag(), vec, vec.size(), type, indent,
-                                     prev_val);
+                                     prev_val, typeRaw);
   }
 
   // Print an array a sequence of JSON values, comma separated, wrapped in "[]".
+  /*
   template<typename T>
-  const char *PrintArray(const void *val, uint16_t size, const Type &type,
-
+  const char *PrintArray(const void *val, size_t size, const Type &type,
                          int indent) {
     typedef Array<T, 0xFFFF> Container;
     typedef typename PrintTag<typename Container::return_type>::type tag;
     auto &arr = *reinterpret_cast<const Container *>(val);
     return PrintContainer<Container>(tag(), arr, size, type, indent, nullptr);
-  }
+  }*/
 
   const char *PrintOffset(const void *val, const Type &type, int indent,
-                          const uint8_t *prev_val, soffset_t vector_index) {
+                   const uint8_t *prev_val, soffset_t vector_index) {
     switch (type.base_type) {
       case BASE_TYPE_UNION: {
         // If this assert hits, you have an corrupt buffer, a union type field
@@ -201,8 +223,8 @@ struct JsonPrinter {
                          indent);
       case BASE_TYPE_STRING: {
         auto s = reinterpret_cast<const String *>(val);
-        bool ok = EscapeString(s->c_str(), s->size(), &text,
-                               opts.allow_non_utf8, opts.natural_utf8);
+        bool ok = EscapeString(s->c_str(), s->size(), &text, opts.allow_non_utf8,
+                               opts.natural_utf8);
         return ok ? nullptr : "string contains non-utf8 bytes";
       }
       case BASE_TYPE_VECTOR: {
@@ -212,7 +234,7 @@ struct JsonPrinter {
         switch (vec_type.base_type) {
         #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, ...) \
           case BASE_TYPE_ ## ENUM: { \
-            auto err = PrintVector<CTYPE>(val, vec_type, indent, prev_val); \
+            auto err = PrintVector<CTYPE>(val, vec_type, indent, prev_val, type); \
             if (err) return err; \
             break; }
           FLATBUFFERS_GEN_TYPES(FLATBUFFERS_TD)
@@ -221,6 +243,7 @@ struct JsonPrinter {
         // clang-format on
         return nullptr;
       }
+        /*
       case BASE_TYPE_ARRAY: {
         const auto vec_type = type.VectorType();
         // Call PrintArray above specifically for each element type:
@@ -239,13 +262,15 @@ struct JsonPrinter {
         }
         // clang-format on
         return nullptr;
-      }
-      default: FLATBUFFERS_ASSERT(0); return "unknown type";
+      }*/
+      default:
+        FLATBUFFERS_ASSERT(0);
+        return "unknown type";
     }
   }
 
   template<typename T> static T GetFieldDefault(const FieldDef &fd) {
-    T val{};
+    T val;
     auto check = StringToNumber(fd.value.constant.c_str(), &val);
     (void)check;
     FLATBUFFERS_ASSERT(check);
@@ -268,14 +293,64 @@ struct JsonPrinter {
         text += "null";
       }
     } else {
-      PrintScalar(table->GetField<T>(fd.value.offset, GetFieldDefault<T>(fd)),
-                  fd.value.type, indent);
+      PrintScalar(
+          table->GetField<T>(fd.value.offset, GetFieldDefault<T>(fd)),
+          fd.value.type, indent);
     }
+  }
+
+  using BYTE = char;
+  std::vector<BYTE> base64_decode(std::string const &encoded_string) {
+    static const std::string base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+    int in_len = encoded_string.size();
+    int i = 0;
+    int j = 0;
+    int in_ = 0;
+    BYTE char_array_4[4], char_array_3[3];
+    std::vector<BYTE> ret;
+
+    while (in_len-- && (encoded_string[in_] != '=')) {
+      char_array_4[i++] = encoded_string[in_];
+      in_++;
+      if (i == 4) {
+        for (i = 0; i < 4; i++)
+          char_array_4[i] = base64_chars.find(char_array_4[i]);
+
+        char_array_3[0] =
+            (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+        char_array_3[1] =
+            ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+        char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+        for (i = 0; (i < 3); i++) ret.push_back(char_array_3[i]);
+        i = 0;
+      }
+    }
+
+    if (i) {
+      for (j = i; j < 4; j++) char_array_4[j] = 0;
+
+      for (j = 0; j < 4; j++)
+        char_array_4[j] = base64_chars.find(char_array_4[j]);
+
+      char_array_3[0] =
+          (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
+      char_array_3[1] =
+          ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
+      char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
+
+      for (j = 0; (j < i - 1); j++) ret.push_back(char_array_3[j]);
+    }
+
+    return ret;
   }
 
   // Generate text for non-scalar field.
   const char *GenFieldOffset(const FieldDef &fd, const Table *table, bool fixed,
-                             int indent, const uint8_t *prev_val) {
+                      int indent, const uint8_t *prev_val) {
     const void *val = nullptr;
     if (fixed) {
       // The only non-scalar fields in structs are structs or arrays.
@@ -309,27 +384,173 @@ struct JsonPrinter {
   // and bracketed by "{}"
   const char *GenStruct(const StructDef &struct_def, const Table *table,
                         int indent) {
-    text += '{';
-    int fieldout = 0;
-    const uint8_t *prev_val = nullptr;
-    const auto elem_indent = indent + Indent();
-    for (auto it = struct_def.fields.vec.begin();
-         it != struct_def.fields.vec.end(); ++it) {
-      FieldDef &fd = **it;
-      auto is_present = struct_def.fixed || table->CheckField(fd.value.offset);
-      auto output_anyway = (opts.output_default_scalars_in_json || fd.key) &&
-                           IsScalar(fd.value.type.base_type) && !fd.deprecated;
+    if (struct_def.name.find("list_") == 0 || struct_def.name.find("clz_Torappu_SimpleKVTable_") == 0) {
+      const uint8_t *prev_val = nullptr;
+      const auto elem_indent = indent + Indent();
+      auto fd = struct_def.fields.vec.at(0);
+      auto is_present = struct_def.fixed || table->CheckField(fd->value.offset);
+      auto output_anyway = (opts.output_default_scalars_in_json || fd->key) &&
+                           IsScalar(fd->value.type.base_type) &&
+                           !fd->deprecated;
+      if (!is_present && (fd->value.type.base_type == BASE_TYPE_STRING ||
+                          fd->value.type.base_type == BASE_TYPE_STRUCT)) {
+        text += ": null";
+      }
       if (is_present || output_anyway) {
-        if (fieldout++) { AddComma(); }
-        AddNewLine();
-        AddIndent(elem_indent);
-        OutputIdentifier(fd.name);
-        if (!opts.protobuf_ascii_alike ||
-            (fd.value.type.base_type != BASE_TYPE_STRUCT &&
-             fd.value.type.base_type != BASE_TYPE_VECTOR))
-          text += ':';
         text += ' ';
         // clang-format off
+        switch (fd->value.type.base_type) {
+        #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, ...) \
+          case BASE_TYPE_ ## ENUM: { \
+            GenField<CTYPE>(*fd, table, struct_def.fixed, elem_indent); \
+            break; }
+            FLATBUFFERS_GEN_TYPES_SCALAR(FLATBUFFERS_TD)
+        #undef FLATBUFFERS_TD
+        // Generate drop-thru case statements for all pointer types:
+        #define FLATBUFFERS_TD(ENUM, ...) \
+          case BASE_TYPE_ ## ENUM:
+              FLATBUFFERS_GEN_TYPES_POINTER(FLATBUFFERS_TD)
+              FLATBUFFERS_GEN_TYPE_ARRAY(FLATBUFFERS_TD)
+        #undef FLATBUFFERS_TD
+            {
+              auto err = GenFieldOffset(*fd, table, struct_def.fixed, elem_indent, prev_val);
+              if (err) return err;
+              break;
+            }
+        }
+        // clang-format on
+        // Track prev val for use with union types.
+        if (struct_def.fixed) {
+          prev_val =
+              reinterpret_cast<const uint8_t *>(table) + fd->value.offset;
+        } else {
+          prev_val = table->GetAddressOf(fd->value.offset);
+        }
+      }
+      AddNewLine();
+      AddIndent(indent);
+    }
+    else if (struct_def.name.find("dict__") == 0) { // map
+      int fieldout = 0;
+      const uint8_t *prev_val = nullptr;
+      const auto elem_indent = indent + Indent();
+        auto fd = struct_def.fields.vec.at(0);
+        if (fd->name == "key") {
+          if (fieldout++) { AddComma(); }
+          AddNewLine();
+          AddIndent(elem_indent);
+          if (fd->value.type.base_type != BASE_TYPE_STRING && !IsEnum(fd->value.type))
+          text += '"';
+          switch (fd->value.type.base_type) {
+#define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, ...)               \
+  case BASE_TYPE_##ENUM: {                                      \
+    GenField<CTYPE>(*fd, table, struct_def.fixed, elem_indent); \
+    break;                                                      \
+  }
+          FLATBUFFERS_GEN_TYPES_SCALAR(FLATBUFFERS_TD)
+#undef FLATBUFFERS_TD
+// Generate drop-thru case statements for all pointer types:
+#define FLATBUFFERS_TD(ENUM, ...) case BASE_TYPE_##ENUM:
+          FLATBUFFERS_GEN_TYPES_POINTER(FLATBUFFERS_TD)
+          FLATBUFFERS_GEN_TYPE_ARRAY(FLATBUFFERS_TD)
+#undef FLATBUFFERS_TD
+          {
+              auto err = GenFieldOffset(*fd, table, struct_def.fixed,
+                                        elem_indent, prev_val);
+              if (err) return err;
+              break;
+          }
+          }
+          if (fd->value.type.base_type != BASE_TYPE_STRING &&
+              !IsEnum(fd->value.type))
+          text += '"';
+
+        }
+        fd = struct_def.fields.vec.at(1);
+        auto is_present =
+            struct_def.fixed || table->CheckField(fd->value.offset);
+        auto output_anyway = (opts.output_default_scalars_in_json || fd->key) &&
+                             IsScalar(fd->value.type.base_type) &&
+                             !fd->deprecated;
+        if (!is_present && !output_anyway) {
+          text += ": null";
+        }
+        if (is_present || output_anyway) {
+          if (!opts.protobuf_ascii_alike ||
+              (fd->value.type.base_type != BASE_TYPE_STRUCT &&
+               fd->value.type.base_type != BASE_TYPE_VECTOR))
+            text += ':';
+          text += ' ';
+          // clang-format off
+        switch (fd->value.type.base_type) {
+        #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, ...) \
+          case BASE_TYPE_ ## ENUM: { \
+            GenField<CTYPE>(*fd, table, struct_def.fixed, elem_indent); \
+            break; }
+            FLATBUFFERS_GEN_TYPES_SCALAR(FLATBUFFERS_TD)
+        #undef FLATBUFFERS_TD
+        // Generate drop-thru case statements for all pointer types:
+        #define FLATBUFFERS_TD(ENUM, ...) \
+          case BASE_TYPE_ ## ENUM:
+              FLATBUFFERS_GEN_TYPES_POINTER(FLATBUFFERS_TD)
+              FLATBUFFERS_GEN_TYPE_ARRAY(FLATBUFFERS_TD)
+        #undef FLATBUFFERS_TD
+            {
+              auto err = GenFieldOffset(*fd, table, struct_def.fixed, elem_indent, prev_val);
+              if (err) return err;
+              break;
+            }
+        }
+          // clang-format on
+          // Track prev val for use with union types.
+          if (struct_def.fixed) {
+            prev_val =
+                reinterpret_cast<const uint8_t *>(table) + fd->value.offset;
+          } else {
+            prev_val = table->GetAddressOf(fd->value.offset);
+          }
+        }
+      AddNewLine();
+      AddIndent(indent);
+    } else if (struct_def.name.find("hg__internal__JObject") == 0) {
+      auto fdBase64 = struct_def.fields.vec[0];
+      auto base64Str = base64_decode(
+          table->GetPointer<const String *>(fdBase64->value.offset)->str());
+      auto bson2json = nlohmann::json::from_bson(base64Str).dump();
+      text += bson2json;
+    }
+    else {
+      text += '{';
+      int fieldout = 0;
+      const uint8_t *prev_val = nullptr;
+      const auto elem_indent = indent + Indent();
+      for (auto it = struct_def.fields.vec.begin();
+           it != struct_def.fields.vec.end(); ++it) {
+        FieldDef &fd = **it;
+        auto is_present =
+            struct_def.fixed || table->CheckField(fd.value.offset);
+        auto output_anyway = (opts.output_default_scalars_in_json || fd.key) &&
+                             IsScalar(fd.value.type.base_type) &&
+                             !fd.deprecated;
+        if (!is_present && (fd.value.type.base_type == BASE_TYPE_STRING ||
+                            fd.value.type.base_type == BASE_TYPE_STRUCT || fd.value.type.base_type == BASE_TYPE_VECTOR)) {
+          if (fieldout++) { AddComma(); }
+          AddNewLine();
+          AddIndent(elem_indent);
+          OutputIdentifier(fd.name);
+          text += ": null";
+        }
+        if (is_present || output_anyway) {
+          if (fieldout++) { AddComma(); }
+          AddNewLine();
+          AddIndent(elem_indent);
+          OutputIdentifier(fd.name);
+          if (!opts.protobuf_ascii_alike ||
+              (fd.value.type.base_type != BASE_TYPE_STRUCT &&
+               fd.value.type.base_type != BASE_TYPE_VECTOR))
+            text += ':';
+          text += ' ';
+          // clang-format off
         switch (fd.value.type.base_type) {
         #define FLATBUFFERS_TD(ENUM, IDLTYPE, CTYPE, ...) \
           case BASE_TYPE_ ## ENUM: { \
@@ -349,18 +570,21 @@ struct JsonPrinter {
               break;
             }
         }
-        // clang-format on
-        // Track prev val for use with union types.
-        if (struct_def.fixed) {
-          prev_val = reinterpret_cast<const uint8_t *>(table) + fd.value.offset;
-        } else {
-          prev_val = table->GetAddressOf(fd.value.offset);
+          // clang-format on
+          // Track prev val for use with union types.
+          if (struct_def.fixed) {
+            prev_val =
+                reinterpret_cast<const uint8_t *>(table) + fd.value.offset;
+          } else {
+            prev_val = table->GetAddressOf(fd.value.offset);
+          }
         }
       }
+      AddNewLine();
+      AddIndent(indent);
+      text += '}';
     }
-    AddNewLine();
-    AddIndent(indent);
-    text += '}';
+
     return nullptr;
   }
 
@@ -374,8 +598,7 @@ struct JsonPrinter {
 };
 
 static const char *GenerateTextImpl(const Parser &parser, const Table *table,
-                                    const StructDef &struct_def,
-                                    std::string *_text) {
+                                    const StructDef &struct_def, std::string *_text) {
   JsonPrinter printer(parser, *_text);
   auto err = printer.GenStruct(struct_def, table, 0);
   if (err) return err;
@@ -384,31 +607,17 @@ static const char *GenerateTextImpl(const Parser &parser, const Table *table,
 }
 
 // Generate a text representation of a flatbuffer in JSON format.
-// Deprecated: please use `GenTextFromTable`
-bool GenerateTextFromTable(const Parser &parser, const void *table,
-                             const std::string &table_name,
-                             std::string *_text) {
-  return GenTextFromTable(parser, table, table_name, _text) != nullptr;
-}
-
-// Generate a text representation of a flatbuffer in JSON format.
-const char *GenTextFromTable(const Parser &parser, const void *table,
-                             const std::string &table_name, std::string *_text) {
+const char *GenerateTextFromTable(const Parser &parser, const void *table,
+                           const std::string &table_name, std::string *_text) {
   auto struct_def = parser.LookupStruct(table_name);
   if (struct_def == nullptr) { return "unknown struct"; }
   auto root = static_cast<const Table *>(table);
   return GenerateTextImpl(parser, root, *struct_def, _text);
 }
 
-// Deprecated: please use `GenText`
-const char *GenerateText(const Parser &parser, const void *flatbuffer,
-                         std::string *_text) {
-  return GenText(parser, flatbuffer, _text);
-}
-
 // Generate a text representation of a flatbuffer in JSON format.
-const char *GenText(const Parser &parser, const void *flatbuffer,
-                    std::string *_text) {
+const char *GenerateText(const Parser &parser, const void *flatbuffer,
+                  std::string *_text) {
   FLATBUFFERS_ASSERT(parser.root_struct_def_);  // call SetRootType()
   auto root = parser.opts.size_prefixed ? GetSizePrefixedRoot<Table>(flatbuffer)
                                         : GetRoot<Table>(flatbuffer);
@@ -420,13 +629,7 @@ static std::string TextFileName(const std::string &path,
   return path + file_name + ".json";
 }
 
-// Deprecated: please use `GenTextFile`
 const char *GenerateTextFile(const Parser &parser, const std::string &path,
-                             const std::string &file_name) {
-  return GenTextFile(parser, path, file_name);
-}
-
-const char *GenTextFile(const Parser &parser, const std::string &path,
                              const std::string &file_name) {
   if (parser.opts.use_flexbuffers) {
     std::string json;
@@ -438,7 +641,7 @@ const char *GenTextFile(const Parser &parser, const std::string &path,
   }
   if (!parser.builder_.GetSize() || !parser.root_struct_def_) return nullptr;
   std::string text;
-  auto err = GenText(parser, parser.builder_.GetBufferPointer(), &text);
+  auto err = GenerateText(parser, parser.builder_.GetBufferPointer(), &text);
   if (err) return err;
   return flatbuffers::SaveFile(TextFileName(path, file_name).c_str(), text,
                                false)
@@ -446,8 +649,8 @@ const char *GenTextFile(const Parser &parser, const std::string &path,
              : "SaveFile failed";
 }
 
-static std::string TextMakeRule(const Parser &parser, const std::string &path,
-                                const std::string &file_name) {
+std::string TextMakeRule(const Parser &parser, const std::string &path,
+                         const std::string &file_name) {
   if (!parser.builder_.GetSize() || !parser.root_struct_def_) return "";
   std::string filebase =
       flatbuffers::StripPath(flatbuffers::StripExtension(file_name));
@@ -466,7 +669,7 @@ class TextCodeGenerator : public CodeGenerator {
  public:
   Status GenerateCode(const Parser &parser, const std::string &path,
                       const std::string &filename) override {
-    auto err = GenTextFile(parser, path, filename);
+    auto err = GenerateTextFile(parser, path, filename);
     if (err) {
       status_detail = " (" + std::string(err) + ")";
       return Status::ERROR;
@@ -476,8 +679,9 @@ class TextCodeGenerator : public CodeGenerator {
 
   // Generate code from the provided `buffer` of given `length`. The buffer is a
   // serialized reflection.fbs.
-  Status GenerateCode(const uint8_t *, int64_t,
-                      const CodeGenOptions &) override {
+  Status GenerateCode(const uint8_t *buffer, int64_t length) override {
+    (void)buffer;
+    (void)length;
     return Status::NOT_IMPLEMENTED;
   }
 
