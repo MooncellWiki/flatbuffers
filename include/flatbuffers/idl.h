@@ -1218,7 +1218,7 @@ class Parser : public ParserState {
 // These functions return nullptr on success, or an error string,
 // which may happen if the flatbuffer cannot be encoded in JSON (e.g.,
 // it contains non-UTF-8 byte arrays in String values).
-extern bool GenerateTextFromTable(const Parser &parser,
+extern const char *GenerateTextFromTable(const Parser &parser,
                                          const void *table,
                                          const std::string &tablename,
                                          std::string *text);

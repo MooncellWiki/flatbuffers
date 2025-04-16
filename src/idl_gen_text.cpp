@@ -679,7 +679,8 @@ class TextCodeGenerator : public CodeGenerator {
 
   // Generate code from the provided `buffer` of given `length`. The buffer is a
   // serialized reflection.fbs.
-  Status GenerateCode(const uint8_t *buffer, int64_t length) override {
+  Status GenerateCode(const uint8_t *buffer, int64_t length,
+                              const CodeGenOptions &options) override {
     (void)buffer;
     (void)length;
     return Status::NOT_IMPLEMENTED;
