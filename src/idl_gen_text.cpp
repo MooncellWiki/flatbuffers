@@ -683,6 +683,7 @@ class TextCodeGenerator : public CodeGenerator {
                               const CodeGenOptions &options) override {
     (void)buffer;
     (void)length;
+    (void)options;
     return Status::NOT_IMPLEMENTED;
   }
 

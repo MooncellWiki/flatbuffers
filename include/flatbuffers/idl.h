@@ -1228,6 +1228,9 @@ extern const char *GenerateTextFile(const Parser &parser,
                                     const std::string &path,
                                     const std::string &file_name);
 
+extern std::string TextMakeRule(const Parser &parser, const std::string &path,
+                                const std::string &file_name);
+
 extern const char *GenTextFromTable(const Parser &parser, const void *table,
                                     const std::string &tablename,
                                     std::string *text);
