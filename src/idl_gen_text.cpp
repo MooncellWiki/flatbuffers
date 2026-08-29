@@ -383,6 +383,27 @@ struct JsonPrinter {
     return PrintOffset(val, fd.value.type, indent, prev_val, -1);
   }
 
+  // Read an integer scalar field of any width from a table. Returns false if
+  // the field is not an integer type.
+  static bool ReadIntegerField(const Table *table, const FieldDef &fd,
+                               int64_t *out) {
+    const auto off = fd.value.offset;
+    switch (fd.value.type.base_type) {
+      case BASE_TYPE_BOOL:
+      case BASE_TYPE_UCHAR: *out = table->GetField<uint8_t>(off, 0); return true;
+      case BASE_TYPE_CHAR: *out = table->GetField<int8_t>(off, 0); return true;
+      case BASE_TYPE_SHORT: *out = table->GetField<int16_t>(off, 0); return true;
+      case BASE_TYPE_USHORT: *out = table->GetField<uint16_t>(off, 0); return true;
+      case BASE_TYPE_INT: *out = table->GetField<int32_t>(off, 0); return true;
+      case BASE_TYPE_UINT: *out = table->GetField<uint32_t>(off, 0); return true;
+      case BASE_TYPE_LONG: *out = table->GetField<int64_t>(off, 0); return true;
+      case BASE_TYPE_ULONG:
+        *out = static_cast<int64_t>(table->GetField<uint64_t>(off, 0));
+        return true;
+      default: return false;
+    }
+  }
+
   // Generate text for a struct or table, values separated by commas, indented,
   // and bracketed by "{}"
   const char *GenStruct(const StructDef &struct_def, const Table *table,
@@ -391,7 +412,9 @@ struct JsonPrinter {
         struct_def.name.find("clz_Torappu_SimpleKVTable_") == 0) {
       const uint8_t *prev_val = nullptr;
       const auto elem_indent = indent + Indent();
-      auto fd = struct_def.fields.vec.at(0);
+      if (struct_def.fields.vec.empty())
+        return "list_ table must have at least one field";
+      auto fd = struct_def.fields.vec[0];
       auto is_present = struct_def.fixed || table->CheckField(fd->value.offset);
       auto output_anyway = (opts.output_default_scalars_in_json || fd->key) &&
                            IsScalar(fd->value.type.base_type) &&
@@ -437,7 +460,9 @@ struct JsonPrinter {
       int fieldout = 0;
       const uint8_t *prev_val = nullptr;
       const auto elem_indent = indent + Indent();
-      auto fd = struct_def.fields.vec.at(0);
+      if (struct_def.fields.vec.size() < 2)
+        return "dict__ table must have key and value fields";
+      auto fd = struct_def.fields.vec[0];
       if (fd->name == "key") {
         if (fieldout++) { AddComma(); }
         AddNewLine();
@@ -469,7 +494,7 @@ struct JsonPrinter {
             !IsEnum(fd->value.type))
           text += '"';
       }
-      fd = struct_def.fields.vec.at(1);
+      fd = struct_def.fields.vec[1];
       auto is_present = struct_def.fixed || table->CheckField(fd->value.offset);
       auto output_anyway = (opts.output_default_scalars_in_json || fd->key) &&
                            IsScalar(fd->value.type.base_type) &&
@@ -513,24 +538,38 @@ struct JsonPrinter {
       AddNewLine();
       AddIndent(indent);
     } else if (struct_def.name.find("hg__internal__MapData") == 0) {
-      auto column_size_field = struct_def.fields.vec.at(0);
-      auto row_size_field = struct_def.fields.vec.at(1);
-      auto map_data_field = struct_def.fields.vec.at(2);
+      if (struct_def.fields.vec.size() < 3)
+        return "hg__internal__MapData table must have column_size, row_size "
+               "and map_data fields";
+      auto column_size_field = struct_def.fields.vec[0];
+      auto row_size_field = struct_def.fields.vec[1];
+      auto map_data_field = struct_def.fields.vec[2];
+      if (!IsVector(map_data_field->value.type) ||
+          map_data_field->value.type.element != BASE_TYPE_USHORT)
+        return "hg__internal__MapData: map_data must be a [ushort] vector";
 
       const auto elem_indent = indent + Indent();
       int fieldout = 0;
 
-      auto column_size =
-          table->GetField<int32_t>(column_size_field->value.offset, 0);
-      auto row_size = table->GetField<int32_t>(row_size_field->value.offset, 0);
+      int64_t column_size = 0, row_size = 0;
+      if (!ReadIntegerField(table, *column_size_field, &column_size) ||
+          !ReadIntegerField(table, *row_size_field, &row_size))
+        return "hg__internal__MapData: column_size/row_size must be integers";
+      if (column_size < 0 || row_size < 0)
+        return "hg__internal__MapData: negative column_size/row_size";
       auto map_data = table->GetPointer<const Vector<uint16_t> *>(
           map_data_field->value.offset);
+      const uint64_t needed =
+          static_cast<uint64_t>(column_size) * static_cast<uint64_t>(row_size);
+      if (needed > 0 && (!map_data || needed > map_data->size()))
+        return "hg__internal__MapData: map_data shorter than "
+               "column_size * row_size";
       text += "[";
-      for (int i = 0; i < column_size; i++) {
+      for (int64_t i = 0; i < column_size; i++) {
         if (fieldout++) { AddComma(); }
         text += "[";
         fieldout = 0;
-        for (int j = 0; j < row_size; j++) {
+        for (int64_t j = 0; j < row_size; j++) {
           if (fieldout++) { AddComma(); }
           AddNewLine();
           AddIndent(elem_indent);
@@ -541,11 +580,22 @@ struct JsonPrinter {
       }
       text += "]";
     } else if (struct_def.name.find("hg__internal__JObject") == 0) {
+      if (struct_def.fields.vec.empty() ||
+          struct_def.fields.vec[0]->value.type.base_type != BASE_TYPE_STRING)
+        return "hg__internal__JObject table must have a string field";
       auto fdBase64 = struct_def.fields.vec[0];
-      auto base64Str = base64_decode(
-          table->GetPointer<const String *>(fdBase64->value.offset)->str());
-      auto bson2json = nlohmann::json::from_bson(base64Str).dump();
-      text += bson2json;
+      auto bsonField =
+          table->GetPointer<const String *>(fdBase64->value.offset);
+      if (!bsonField) {
+        text += "null";
+      } else {
+        try {
+          text += nlohmann::json::from_bson(base64_decode(bsonField->str()))
+                      .dump();
+        } catch (const nlohmann::json::exception &) {
+          return "hg__internal__JObject: invalid BSON payload";
+        }
+      }
     } else {
       text += '{';
       int fieldout = 0;
