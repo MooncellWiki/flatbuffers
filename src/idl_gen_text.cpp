@@ -383,6 +383,26 @@ struct JsonPrinter {
     return PrintOffset(val, fd.value.type, indent, prev_val, -1);
   }
 
+  // Format element `i` of a vector whose integer element type is `et`,
+  // reading it with the width that type has in the buffer.
+  static std::string IntegerElementToString(const uint8_t *data,
+                                            const BaseType et, size_t i) {
+    const uint8_t *p = data + i * SizeOf(et);
+    switch (et) {
+      case BASE_TYPE_UTYPE:
+      case BASE_TYPE_BOOL:
+      case BASE_TYPE_UCHAR: return NumToString(ReadScalar<uint8_t>(p));
+      case BASE_TYPE_CHAR: return NumToString(ReadScalar<int8_t>(p));
+      case BASE_TYPE_SHORT: return NumToString(ReadScalar<int16_t>(p));
+      case BASE_TYPE_USHORT: return NumToString(ReadScalar<uint16_t>(p));
+      case BASE_TYPE_INT: return NumToString(ReadScalar<int32_t>(p));
+      case BASE_TYPE_UINT: return NumToString(ReadScalar<uint32_t>(p));
+      case BASE_TYPE_LONG: return NumToString(ReadScalar<int64_t>(p));
+      case BASE_TYPE_ULONG: return NumToString(ReadScalar<uint64_t>(p));
+      default: return "0";
+    }
+  }
+
   // Read an integer scalar field of any width from a table. Returns false if
   // the field is not an integer type.
   static bool ReadIntegerField(const Table *table, const FieldDef &fd,
@@ -544,9 +564,13 @@ struct JsonPrinter {
       auto column_size_field = struct_def.fields.vec[0];
       auto row_size_field = struct_def.fields.vec[1];
       auto map_data_field = struct_def.fields.vec[2];
-      if (!IsVector(map_data_field->value.type) ||
-          map_data_field->value.type.element != BASE_TYPE_USHORT)
-        return "hg__internal__MapData: map_data must be a [ushort] vector";
+      // The matrix element type is whatever the schema declares (currently
+      // [short], mirroring the game's C# short[]; older schemas used
+      // [ushort]). Elements are read with the declared width, so any integer
+      // type works and the bounds check below stays valid.
+      const auto map_elem = map_data_field->value.type.element;
+      if (!IsVector(map_data_field->value.type) || !IsInteger(map_elem))
+        return "hg__internal__MapData: map_data must be a vector of integers";
 
       const auto elem_indent = indent + Indent();
       int fieldout = 0;
@@ -557,7 +581,9 @@ struct JsonPrinter {
         return "hg__internal__MapData: column_size/row_size must be integers";
       if (column_size < 0 || row_size < 0)
         return "hg__internal__MapData: negative column_size/row_size";
-      auto map_data = table->GetPointer<const Vector<uint16_t> *>(
+      // Only the length prefix and the element base pointer are used here;
+      // the element width comes from the schema (IntegerElementToString).
+      auto map_data = table->GetPointer<const Vector<uint8_t> *>(
           map_data_field->value.offset);
       const uint64_t needed =
           static_cast<uint64_t>(column_size) * static_cast<uint64_t>(row_size);
@@ -573,8 +599,8 @@ struct JsonPrinter {
           if (fieldout++) { AddComma(); }
           AddNewLine();
           AddIndent(elem_indent);
-          text += NumToString(
-              map_data->Get(static_cast<uoffset_t>(i * row_size + j)));
+          text += IntegerElementToString(map_data->Data(), map_elem,
+                                         static_cast<size_t>(i * row_size + j));
         }
         text += "]";
       }
